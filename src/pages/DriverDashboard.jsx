@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import toast from 'react-hot-toast'
 import {
   FaMapMarkerAlt,
   FaEuroSign,
@@ -12,6 +13,7 @@ import {
 } from 'react-icons/fa'
 import { HiLogout } from 'react-icons/hi'
 import { useAuth } from '../hooks/useAuth'
+import { useSocket } from '../context/SocketContext'
 import Button from '../components/Button'
 
 // Données simulées — demandes disponibles à proximité
@@ -26,7 +28,7 @@ const mockAvailable = [
   },
   {
     id: '102',
-    description: 'Batterie à plat, besoin d\'un boost',
+    description: "Batterie à plat, besoin d'un boost",
     address: 'Place Bellecour, Lyon — 1.8 km',
     clientName: 'Karim B.',
     postedAt: '12 min',
@@ -73,16 +75,98 @@ const urgencyConfig = {
 
 export default function DriverDashboard() {
   const { user, logout } = useAuth()
+  const { isConnected, emit, on, off } = useSocket()
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState('available')
   const [isOnline, setIsOnline] = useState(true)
   const [offerModal, setOfferModal] = useState(null)
   const [offerPrice, setOfferPrice] = useState('')
+  const [availableRequests, setAvailableRequests] = useState(mockAvailable)
+  const locationIntervalRef = useRef(null)
 
   const handleLogout = () => {
     logout()
     navigate('/')
   }
+
+  // Écoute WebSocket : nouvelle demande disponible
+  useEffect(() => {
+    const handleNewRequest = (request) => {
+      setAvailableRequests((prev) => {
+        // Éviter les doublons
+        if (prev.find((r) => r.id === request.id)) return prev
+        return [request, ...prev]
+      })
+      toast(
+        `🔔 Nouvelle demande — ${request.description || 'Une demande proche de vous'}`,
+        {
+          style: {
+            background: '#2563eb',
+            color: '#fff',
+            fontWeight: '600',
+          },
+          icon: '📍',
+          duration: 5000,
+        }
+      )
+    }
+
+    on('new_request', handleNewRequest)
+    return () => off('new_request', handleNewRequest)
+  }, [on, off])
+
+  // Écoute WebSocket : offre acceptée par le client
+  useEffect(() => {
+    const handleOfferAccepted = (data) => {
+      toast(
+        `🎉 Félicitations ! Votre offre a été acceptée${data?.clientName ? ` par ${data.clientName}` : ''} !`,
+        {
+          style: {
+            background: '#ea580c',
+            color: '#fff',
+            fontWeight: '600',
+          },
+          icon: '✅',
+          duration: 6000,
+        }
+      )
+    }
+
+    on('offer_accepted', handleOfferAccepted)
+    return () => off('offer_accepted', handleOfferAccepted)
+  }, [on, off])
+
+  // Émission de la position GPS toutes les 10s si dispo
+  useEffect(() => {
+    if (isOnline && navigator.geolocation) {
+      const sendLocation = () => {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            emit('driver_location_update', {
+              lat: pos.coords.latitude,
+              lng: pos.coords.longitude,
+            })
+          },
+          (err) => {
+            console.warn('[GPS] Impossible de récupérer la position :', err.message)
+          },
+          { enableHighAccuracy: true, timeout: 8000 }
+        )
+      }
+
+      // Envoi immédiat
+      sendLocation()
+      // Puis toutes les 10 secondes
+      locationIntervalRef.current = setInterval(sendLocation, 10000)
+    }
+
+    return () => {
+      if (locationIntervalRef.current) {
+        clearInterval(locationIntervalRef.current)
+        locationIntervalRef.current = null
+      }
+    }
+  }, [isOnline, emit])
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -119,6 +203,14 @@ export default function DriverDashboard() {
           </nav>
 
           <div className="px-4 py-5 border-t border-white/10">
+            {/* Status WebSocket */}
+            <div className="flex items-center gap-2 mb-3 px-2">
+              <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-red-400'}`} />
+              <span className={`text-xs font-medium ${isConnected ? 'text-green-300' : 'text-red-300'}`}>
+                {isConnected ? '● En ligne' : '● Hors ligne'}
+              </span>
+            </div>
+
             {/* Online toggle */}
             <div className="flex items-center justify-between mb-4 p-3 bg-white/10 rounded-xl">
               <span className="text-sm font-medium">Disponible</span>
@@ -161,11 +253,18 @@ export default function DriverDashboard() {
               <span className="text-white font-bold">Dépan<span className="text-accent">Now</span></span>
             </Link>
             <div className="flex items-center gap-3">
+              {/* Badge WebSocket statut */}
+              <span className={`flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full ${
+                isConnected ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-300'
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-green-400' : 'bg-red-400'}`} />
+                {isConnected ? 'En ligne' : 'Hors ligne'}
+              </span>
               <button
                 onClick={() => setIsOnline(!isOnline)}
                 className={`text-xs font-semibold px-3 py-1.5 rounded-full transition-colors ${isOnline ? 'bg-green-500 text-white' : 'bg-white/20 text-white'}`}
               >
-                {isOnline ? '● En ligne' : '○ Hors ligne'}
+                {isOnline ? '● Dispo' : '○ Indispo'}
               </button>
               <button onClick={handleLogout} className="text-white/70 hover:text-white">
                 <HiLogout className="w-5 h-5" />
@@ -182,8 +281,17 @@ export default function DriverDashboard() {
                     {isOnline ? '🟢 Vous êtes en ligne' : '⚫ Vous êtes hors ligne'}
                   </h1>
                   <p className="text-white/80 text-sm mt-0.5">
-                    {isOnline ? 'Vous recevez les demandes de dépannage proches de vous.' : 'Activez votre statut pour recevoir des demandes.'}
+                    {isOnline
+                      ? 'Vous recevez les demandes de dépannage proches de vous.'
+                      : 'Activez votre statut pour recevoir des demandes.'}
                   </p>
+                </div>
+                {/* Badge connexion WebSocket dans le banner */}
+                <div className={`hidden sm:flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full ${
+                  isConnected ? 'bg-white/20 text-white' : 'bg-black/20 text-white/60'
+                }`}>
+                  <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-300 animate-pulse' : 'bg-red-400'}`} />
+                  {isConnected ? '● En ligne' : '● Hors ligne'}
                 </div>
               </div>
             </div>
@@ -222,14 +330,14 @@ export default function DriverDashboard() {
             </div>
 
             {/* Available requests */}
-            {(activeTab === 'available' || window.innerWidth < 1024) && activeTab === 'available' && (
+            {activeTab === 'available' && (
               <div className="bg-white rounded-2xl shadow-sm">
                 <div className="p-5 border-b border-gray-100 flex items-center justify-between">
                   <h2 className="font-bold text-primary text-lg">
                     Demandes proches
                     {isOnline && (
                       <span className="ml-2 text-xs bg-accent/10 text-accent px-2 py-0.5 rounded-full">
-                        {mockAvailable.length} nouvelles
+                        {availableRequests.length} nouvelles
                       </span>
                     )}
                   </h2>
@@ -245,8 +353,8 @@ export default function DriverDashboard() {
                   </div>
                 ) : (
                   <div className="divide-y divide-gray-50">
-                    {mockAvailable.map((req) => {
-                      const urg = urgencyConfig[req.urgency]
+                    {availableRequests.map((req) => {
+                      const urg = urgencyConfig[req.urgency] || urgencyConfig.medium
                       return (
                         <div key={req.id} className="p-5">
                           <div className="flex items-start justify-between gap-4">
@@ -313,9 +421,15 @@ export default function DriverDashboard() {
               </div>
             )}
 
-            {/* Placeholder notice */}
-            <div className="mt-6 p-4 bg-orange-50 border border-orange-100 rounded-xl text-orange-700 text-sm text-center">
-              🚀 <strong>Sprint 3</strong> — Carte en temps réel, chat client/dépanneur, système de paiement
+            {/* Realtime notice */}
+            <div className={`mt-6 p-4 rounded-xl text-sm text-center border ${
+              isConnected
+                ? 'bg-green-50 border-green-100 text-green-700'
+                : 'bg-gray-50 border-gray-100 text-gray-500'
+            }`}>
+              {isConnected
+                ? `🟢 Temps réel actif${isOnline ? ' — position GPS transmise toutes les 10s' : ''}`
+                : '⏳ Reconnexion au serveur…'}
             </div>
           </div>
         </main>
@@ -352,9 +466,14 @@ export default function DriverDashboard() {
                 className="flex-1"
                 disabled={!offerPrice}
                 onClick={() => {
-                  // TODO: appel API Sprint 3
+                  // Émettre l'offre via WebSocket
+                  emit('submit_offer', {
+                    requestId: offerModal.id,
+                    price: Number(offerPrice),
+                  })
                   setOfferModal(null)
                   setOfferPrice('')
+                  toast.success('Offre envoyée !', { duration: 3000 })
                 }}
               >
                 Envoyer {offerPrice ? `${offerPrice} €` : ''}

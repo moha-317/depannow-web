@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import toast from 'react-hot-toast'
 import {
   FaMapMarkerAlt,
   FaPlus,
@@ -12,7 +13,9 @@ import {
 } from 'react-icons/fa'
 import { HiLogout } from 'react-icons/hi'
 import { useAuth } from '../hooks/useAuth'
+import { useSocket } from '../context/SocketContext'
 import Button from '../components/Button'
+import MapView from '../components/MapView'
 
 // Données simulées
 const mockRequests = [
@@ -56,14 +59,70 @@ const statusConfig = {
 
 export default function Dashboard() {
   const { user, logout } = useAuth()
+  const { isConnected, on, off } = useSocket()
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState('requests')
   const [showNewRequest, setShowNewRequest] = useState(false)
+  const [requests, setRequests] = useState(mockRequests)
+  const [liveDrivers, setLiveDrivers] = useState([])
+
+  // Écoute WebSocket : nouvelle offre reçue
+  useEffect(() => {
+    const handleNewOffer = (offer) => {
+      setRequests((prev) =>
+        prev.map((req) =>
+          req.id === offer.requestId
+            ? { ...req, offers: (req.offers || 0) + 1 }
+            : req
+        )
+      )
+      toast.success(
+        `💶 Nouvelle offre reçue — ${offer.driverName || 'Un dépanneur'} propose ${offer.price ? offer.price + ' €' : 'un prix'}`,
+        {
+          style: {
+            background: '#16a34a',
+            color: '#fff',
+            fontWeight: '600',
+          },
+          iconTheme: { primary: '#fff', secondary: '#16a34a' },
+        }
+      )
+    }
+
+    on('new_offer', handleNewOffer)
+    return () => off('new_offer', handleNewOffer)
+  }, [on, off])
+
+  // Écoute WebSocket : position du dépanneur en direct
+  useEffect(() => {
+    const handleDriverLocation = ({ driverId, lat, lng }) => {
+      setLiveDrivers((prev) => {
+        const exists = prev.find((d) => d.driverId === driverId)
+        if (exists) {
+          return prev.map((d) => (d.driverId === driverId ? { driverId, lat, lng } : d))
+        }
+        return [...prev, { driverId, lat, lng }]
+      })
+    }
+
+    on('driver_location', handleDriverLocation)
+    return () => off('driver_location', handleDriverLocation)
+  }, [on, off])
 
   const handleLogout = () => {
     logout()
     navigate('/')
   }
+
+  // Marqueurs pour la carte : position client + dépanneurs en direct
+  const mapMarkers = [
+    ...liveDrivers.map((d) => ({
+      lat: d.lat,
+      lng: d.lng,
+      type: 'driver',
+      popup: `Dépanneur en route`,
+    })),
+  ]
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -100,6 +159,14 @@ export default function Dashboard() {
           </nav>
 
           <div className="px-4 py-5 border-t border-white/10">
+            {/* Connexion status */}
+            <div className="flex items-center gap-2 mb-4 px-2">
+              <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-gray-400'}`} />
+              <span className={`text-xs font-medium ${isConnected ? 'text-green-300' : 'text-white/40'}`}>
+                {isConnected ? 'Connecté' : 'Hors ligne'}
+              </span>
+            </div>
+
             <div className="flex items-center gap-3 mb-4">
               <div className="w-9 h-9 bg-accent/20 rounded-full flex items-center justify-center">
                 <FaUser className="w-4 h-4 text-accent" />
@@ -129,9 +196,18 @@ export default function Dashboard() {
               </div>
               <span className="text-white font-bold">Dépan<span className="text-accent">Now</span></span>
             </Link>
-            <button onClick={handleLogout} className="text-white/70 hover:text-white">
-              <HiLogout className="w-5 h-5" />
-            </button>
+            <div className="flex items-center gap-3">
+              {/* Badge connexion mobile */}
+              <span className={`flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full ${
+                isConnected ? 'bg-green-500/20 text-green-300' : 'bg-white/10 text-white/40'
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-green-400' : 'bg-gray-400'}`} />
+                {isConnected ? 'Connecté' : 'Hors ligne'}
+              </span>
+              <button onClick={handleLogout} className="text-white/70 hover:text-white">
+                <HiLogout className="w-5 h-5" />
+              </button>
+            </div>
           </header>
 
           <div className="p-6 max-w-4xl mx-auto">
@@ -155,9 +231,9 @@ export default function Dashboard() {
             {/* Stats */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
               {[
-                { label: 'Demandes', value: mockRequests.length, color: 'text-primary' },
-                { label: 'En cours', value: mockRequests.filter(r => r.status === 'in_progress').length, color: 'text-blue-600' },
-                { label: 'Terminées', value: mockRequests.filter(r => r.status === 'completed').length, color: 'text-green-600' },
+                { label: 'Demandes', value: requests.length, color: 'text-primary' },
+                { label: 'En cours', value: requests.filter(r => r.status === 'in_progress').length, color: 'text-blue-600' },
+                { label: 'Terminées', value: requests.filter(r => r.status === 'completed').length, color: 'text-green-600' },
                 { label: 'Note moy.', value: '4.9 ⭐', color: 'text-yellow-600' },
               ].map((stat, i) => (
                 <div key={i} className="bg-white rounded-xl p-4 shadow-sm">
@@ -166,6 +242,22 @@ export default function Dashboard() {
                 </div>
               ))}
             </div>
+
+            {/* Map with live drivers */}
+            {liveDrivers.length > 0 && (
+              <div className="mb-6">
+                <h2 className="font-bold text-primary text-sm mb-2 flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                  Position du dépanneur en direct
+                </h2>
+                <MapView
+                  center={{ lat: liveDrivers[0].lat, lng: liveDrivers[0].lng }}
+                  markers={mapMarkers}
+                  liveDrivers={liveDrivers}
+                  height="250px"
+                />
+              </div>
+            )}
 
             {/* Requests list */}
             <div className="bg-white rounded-2xl shadow-sm">
@@ -177,7 +269,7 @@ export default function Dashboard() {
                 </Button>
               </div>
 
-              {mockRequests.length === 0 ? (
+              {requests.length === 0 ? (
                 <div className="p-12 text-center">
                   <FaMapMarkerAlt className="w-12 h-12 text-gray-200 mx-auto mb-4" />
                   <p className="text-gray-500">Aucune demande pour l'instant</p>
@@ -187,7 +279,7 @@ export default function Dashboard() {
                 </div>
               ) : (
                 <div className="divide-y divide-gray-50">
-                  {mockRequests.map((req) => {
+                  {requests.map((req) => {
                     const status = statusConfig[req.status]
                     return (
                       <div key={req.id} className="p-5 hover:bg-gray-50 transition-colors">
@@ -231,9 +323,15 @@ export default function Dashboard() {
               )}
             </div>
 
-            {/* Placeholder notice */}
-            <div className="mt-6 p-4 bg-blue-50 border border-blue-100 rounded-xl text-blue-700 text-sm text-center">
-              🚀 <strong>Sprint 3 à venir</strong> — Carte interactive, négociation en temps réel, paiement intégré
+            {/* Realtime notice */}
+            <div className={`mt-6 p-4 rounded-xl text-sm text-center border ${
+              isConnected
+                ? 'bg-green-50 border-green-100 text-green-700'
+                : 'bg-blue-50 border-blue-100 text-blue-700'
+            }`}>
+              {isConnected
+                ? '🟢 Temps réel actif — Vous recevrez vos nouvelles offres instantanément'
+                : '⏳ Connexion au serveur en cours…'}
             </div>
           </div>
         </main>
